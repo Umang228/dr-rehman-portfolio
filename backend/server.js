@@ -1,0 +1,98 @@
+const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
+
+const express = require("express");
+const cors = require("cors");
+const nodemailer = require("nodemailer");
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
+app.use(express.json());
+
+const requiredEmailEnv = [
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_USER",
+  "SMTP_PASS",
+  "MAIL_TO",
+];
+
+const hasEmailConfig = requiredEmailEnv.every((key) => Boolean(process.env[key]));
+
+const transporter = hasEmailConfig
+  ? nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT),
+      secure: Number(process.env.SMTP_PORT) === 465,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    })
+  : null;
+
+app.get("/api/health", (_req, res) => {
+  res.status(200).json({ ok: true, message: "Backend is running" });
+});
+
+app.post("/api/contact", async (req, res) => {
+  const { name, email, phone, message } = req.body || {};
+
+  if (!name || !email) {
+    return res
+      .status(400)
+      .json({ ok: false, message: "Name and email are required." });
+  }
+
+  if (!transporter) {
+    return res.status(500).json({
+      ok: false,
+      message:
+        "Email service is not configured. Please set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and MAIL_TO.",
+    });
+  }
+
+  try {
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || `"Website Contact" <${process.env.SMTP_USER}>`,
+      to: process.env.MAIL_TO,
+      replyTo: email,
+      subject: `New Consultation Request from ${name}`,
+      text: [
+        "New contact form submission",
+        "",
+        `Name: ${name}`,
+        `Email: ${email}`,
+        `Phone: ${phone || "-"}`,
+        "",
+        "Message:",
+        message || "-",
+      ].join("\n"),
+      html: `
+        <h2>New Contact Form Submission</h2>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Phone:</strong> ${phone || "-"}</p>
+        <p><strong>Message:</strong></p>
+        <p>${(message || "-").replace(/\n/g, "<br/>")}</p>
+      `,
+    });
+
+    return res.status(201).json({
+      ok: true,
+      message: "Form submitted and email sent successfully.",
+    });
+  } catch (error) {
+    console.error("Email send failed:", error);
+    return res.status(500).json({
+      ok: false,
+      message: "Form received, but email could not be sent.",
+    });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Backend server listening on http://localhost:${PORT}`);
+});
