@@ -9,6 +9,24 @@ if (typeof dns.setDefaultResultOrder === "function") {
 const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
+app.use(express.json());
+
+const MAIL_TO = process.env.MAIL_TO;
+const MAIL_FROM =
+  process.env.MAIL_FROM || "Dr. Rahman Website <onboarding@resend.dev>";
+
+const resendClient = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
+
+const smtpEnv = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS"];
+const hasSmtpConfig = smtpEnv.every((k) => Boolean(process.env[k]));
 
 const ipv4Lookup = (hostname, options, callback) => {
   if (typeof options === "function") {
@@ -18,23 +36,7 @@ const ipv4Lookup = (hostname, options, callback) => {
   return dns.lookup(hostname, { ...(options || {}), family: 4 }, callback);
 };
 
-const app = express();
-const PORT = process.env.PORT || 5000;
-
-app.use(cors());
-app.use(express.json());
-
-const requiredEmailEnv = [
-  "SMTP_HOST",
-  "SMTP_PORT",
-  "SMTP_USER",
-  "SMTP_PASS",
-  "MAIL_TO",
-];
-
-const hasEmailConfig = requiredEmailEnv.every((key) => Boolean(process.env[key]));
-
-const transporter = hasEmailConfig
+const smtpTransporter = hasSmtpConfig
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT),
@@ -52,21 +54,30 @@ const transporter = hasEmailConfig
     })
   : null;
 
-if (transporter) {
-  transporter.verify((err) => {
-    if (err) {
-      console.error("[SMTP] verify failed:", err.code, err.message);
-    } else {
-      console.log("[SMTP] transporter ready (host=%s user=%s)", process.env.SMTP_HOST, process.env.SMTP_USER);
-    }
+if (resendClient) {
+  console.log("[mail] using Resend HTTPS API");
+} else if (smtpTransporter) {
+  console.log("[mail] using SMTP (host=%s)", process.env.SMTP_HOST);
+  smtpTransporter.verify((err) => {
+    if (err) console.error("[SMTP] verify failed:", err.code, err.message);
+    else console.log("[SMTP] transporter ready");
   });
 } else {
-  const missing = requiredEmailEnv.filter((k) => !process.env[k]);
-  console.warn("[SMTP] disabled — missing env:", missing.join(", "));
+  console.warn(
+    "[mail] disabled — set RESEND_API_KEY (recommended) or SMTP_* + MAIL_TO."
+  );
+}
+
+if (!MAIL_TO) {
+  console.warn("[mail] MAIL_TO is not set; emails will fail until it is.");
 }
 
 app.get("/api/health", (_req, res) => {
-  res.status(200).json({ ok: true, message: "Backend is running" });
+  res.status(200).json({
+    ok: true,
+    message: "Backend is running",
+    mailProvider: resendClient ? "resend" : smtpTransporter ? "smtp" : "none",
+  });
 });
 
 app.post("/api/contact", async (req, res) => {
@@ -78,50 +89,73 @@ app.post("/api/contact", async (req, res) => {
       .json({ ok: false, message: "Name and email are required." });
   }
 
-  if (!transporter) {
+  if (!MAIL_TO || (!resendClient && !smtpTransporter)) {
     return res.status(500).json({
       ok: false,
       message:
-        "Email service is not configured. Please set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and MAIL_TO.",
+        "Email service is not configured. Set RESEND_API_KEY (recommended) or SMTP_* env vars, plus MAIL_TO.",
     });
   }
 
-  try {
-    await transporter.sendMail({
-      from: process.env.MAIL_FROM || `"Website Contact" <${process.env.SMTP_USER}>`,
-      to: process.env.MAIL_TO,
-      replyTo: email,
-      subject: `New Consultation Request from ${name}`,
-      text: [
-        "New contact form submission",
-        "",
-        `Name: ${name}`,
-        `Email: ${email}`,
-        `Phone: ${phone || "-"}`,
-        "",
-        "Message:",
-        message || "-",
-      ].join("\n"),
-      html: `
-        <h2>New Contact Form Submission</h2>
-        <p><strong>Name:</strong> ${name}</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Phone:</strong> ${phone || "-"}</p>
-        <p><strong>Message:</strong></p>
-        <p>${(message || "-").replace(/\n/g, "<br/>")}</p>
-      `,
-    });
+  const subject = `New Consultation Request from ${name}`;
+  const text = [
+    "New contact form submission",
+    "",
+    `Name: ${name}`,
+    `Email: ${email}`,
+    `Phone: ${phone || "-"}`,
+    "",
+    "Message:",
+    message || "-",
+  ].join("\n");
+  const html = `
+    <h2>New Contact Form Submission</h2>
+    <p><strong>Name:</strong> ${name}</p>
+    <p><strong>Email:</strong> ${email}</p>
+    <p><strong>Phone:</strong> ${phone || "-"}</p>
+    <p><strong>Message:</strong></p>
+    <p>${(message || "-").replace(/\n/g, "<br/>")}</p>
+  `;
 
-    return res.status(201).json({
-      ok: true,
-      message: "Form submitted and email sent successfully.",
-    });
+  try {
+    if (resendClient) {
+      const { data, error } = await resendClient.emails.send({
+        from: MAIL_FROM,
+        to: MAIL_TO,
+        replyTo: email,
+        subject,
+        text,
+        html,
+      });
+      if (error) {
+        console.error("[Resend] send failed:", error);
+        return res.status(500).json({
+          ok: false,
+          message: "Form received, but email could not be sent.",
+          error: { code: error.name || "ResendError", message: error.message },
+        });
+      }
+      console.log("[Resend] sent id=%s", data && data.id);
+    } else {
+      await smtpTransporter.sendMail({
+        from: MAIL_FROM,
+        to: MAIL_TO,
+        replyTo: email,
+        subject,
+        text,
+        html,
+      });
+      console.log("[SMTP] sent");
+    }
+
+    return res
+      .status(201)
+      .json({ ok: true, message: "Form submitted and email sent successfully." });
   } catch (error) {
-    console.error("[SMTP] send failed:", {
+    console.error("[mail] send failed:", {
       code: error.code,
-      command: error.command,
-      response: error.response,
       message: error.message,
+      response: error.response,
     });
     return res.status(500).json({
       ok: false,
