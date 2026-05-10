@@ -1,9 +1,22 @@
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
 
+const dns = require("dns");
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("ipv4first");
+}
+
 const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
+
+const ipv4Lookup = (hostname, options, callback) => {
+  if (typeof options === "function") {
+    callback = options;
+    options = {};
+  }
+  return dns.lookup(hostname, { ...(options || {}), family: 4 }, callback);
+};
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -27,9 +40,11 @@ const transporter = hasEmailConfig
       port: Number(process.env.SMTP_PORT),
       secure: Number(process.env.SMTP_PORT) === 465,
       family: 4,
+      lookup: ipv4Lookup,
       connectionTimeout: 15000,
       greetingTimeout: 15000,
       socketTimeout: 20000,
+      tls: { servername: process.env.SMTP_HOST },
       auth: {
         user: process.env.SMTP_USER,
         pass: (process.env.SMTP_PASS || "").replace(/\s+/g, ""),
