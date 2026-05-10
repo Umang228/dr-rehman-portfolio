@@ -28,10 +28,23 @@ const transporter = hasEmailConfig
       secure: Number(process.env.SMTP_PORT) === 465,
       auth: {
         user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+        pass: (process.env.SMTP_PASS || "").replace(/\s+/g, ""),
       },
     })
   : null;
+
+if (transporter) {
+  transporter.verify((err) => {
+    if (err) {
+      console.error("[SMTP] verify failed:", err.code, err.message);
+    } else {
+      console.log("[SMTP] transporter ready (host=%s user=%s)", process.env.SMTP_HOST, process.env.SMTP_USER);
+    }
+  });
+} else {
+  const missing = requiredEmailEnv.filter((k) => !process.env[k]);
+  console.warn("[SMTP] disabled — missing env:", missing.join(", "));
+}
 
 app.get("/api/health", (_req, res) => {
   res.status(200).json({ ok: true, message: "Backend is running" });
@@ -85,10 +98,20 @@ app.post("/api/contact", async (req, res) => {
       message: "Form submitted and email sent successfully.",
     });
   } catch (error) {
-    console.error("Email send failed:", error);
+    console.error("[SMTP] send failed:", {
+      code: error.code,
+      command: error.command,
+      response: error.response,
+      message: error.message,
+    });
     return res.status(500).json({
       ok: false,
       message: "Form received, but email could not be sent.",
+      error: {
+        code: error.code,
+        message: error.message,
+        response: error.response,
+      },
     });
   }
 });
